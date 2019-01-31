@@ -1,0 +1,64 @@
+[[listen]]
+type = "tcp"
+address = "localhost:53"
+
+[[listen]]
+type = "udp"
+address = "localhost:53"
+
+[[upstreams]]
+name = "google"
+address = "https://dns.google.com/resolve"
+method = "doh-json"
+
+[[upstreams]]
+name = "cloudflare"
+address = "https://1.1.1.1/dns-query"
+method = "doh-wireformat"
+
+[[upstreams]]
+name = "cloudflare-tcp"
+address = "1.1.1.1:53"
+method = "tcp"
+
+[[upstreams]]
+name = "aliyun"
+address = "223.5.5.5:53"
+method = "udp"
+
+[[rules]]
+name = "fqdn:hello.world"
+answer = "hello.world 3600 IN TXT \"世界那么大我想去看看\""
+
+[[rules]]
+name = "group:block"
+action = "reject"
+
+[[rules]]
+name = "group:gfwlist"
+upstream = "cloudflare"
+
+[[rules]]
+name = "fqdn:dns.google.com"
+upstream = "cloudflare"
+
+[[rules]]
+name = "suffix:.bilibili.com"
+upstream = "aliyun"
+
+[[rules]]
+name = "other"
+upstream = "cloudflare"
+
+[Groups.block]
+list = [
+"www.baidu.com",
+]
+
+[Groups.gfwlist]
+list = [
+"www.bilibili.com",
+"www.google.com",
+"www.facebook.com",
+"www.youtube.com",
+]
