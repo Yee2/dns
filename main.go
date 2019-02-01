@@ -4,7 +4,6 @@ import (
 	"github.com/urfave/cli"
 	"github.com/miekg/dns"
 	"os"
-	"log"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -51,15 +50,15 @@ type Rule interface {
 func main() {
 	app := &cli.App{Name: "DNS", Action: run, Flags: []cli.Flag{
 		cli.StringFlag{
-			Name: "address",
-			//Value: "https://dns.google.com/resolve",
-			Value: "https://1.1.1.1/dns-query",
-			Usage: "dns-over-https handle server",
+			Name:  "config",
+			Value: "/etc/my-dns/config.toml",
+			Usage: "set the config.toml file path",
 		},
 	}}
 	err := app.Run(os.Args)
 	if err != nil {
-		log.Fatalln(err)
+		logger.Error(err)
+		os.Exit(-1)
 	}
 }
 
@@ -80,13 +79,13 @@ func (rules Rules) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	}
 }
 func run(ctx *cli.Context) error {
-	data, err := ioutil.ReadFile("config.toml")
+	data, err := ioutil.ReadFile(ctx.String("config"))
 	if err != nil {
-		return err
+		return errors.Wrapf(err, "Failed to read configuration file(%s)", ctx.String("config"))
 	}
 
 	if err := toml.Unmarshal(data, &config); err != nil {
-		return err
+		return errors.Wrapf(err, "Unable to parse configuration file(%s)", ctx.String("config"))
 	}
 	logger.Debugf("%+v", config)
 	handles := make(map[string]dns.Handler)
@@ -406,7 +405,7 @@ func NewAnswer(s string) (*Answer, error) {
 	if err != nil {
 		return nil, err
 	}
-	reply := &dns.Msg{Answer:[]dns.RR{rr}}
+	reply := &dns.Msg{Answer: []dns.RR{rr}}
 	return &Answer{reply}, nil
 }
 

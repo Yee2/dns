@@ -1,0 +1,10 @@
+[Unit]
+Description=my dns service
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/my-dns --config /etc/my-dns/config.toml
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
