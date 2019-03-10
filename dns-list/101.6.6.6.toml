@@ -1,0 +1,16 @@
+[[listen]]
+type = "tcp"
+address = "localhost:53"
+
+[[listen]]
+type = "udp"
+address = "localhost:53"
+
+[[upstreams]]
+name = "TUNA-DNS666"
+address = "101.6.6.6:53"
+method = "tcp"
+
+[[rules]]
+name = "other"
+upstream = "TUNA-DNS666"

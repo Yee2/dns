@@ -1,19 +1,19 @@
 package main
 
 import (
-	"github.com/urfave/cli"
-	"github.com/miekg/dns"
-	"os"
+	"bytes"
+	"crypto/tls"
+	"encoding/json"
 	"fmt"
+	"github.com/BurntSushi/toml"
+	"github.com/miekg/dns"
+	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
+	"github.com/urfave/cli"
+	"io/ioutil"
 	"net/http"
 	"net/url"
-	"github.com/sirupsen/logrus"
-	"github.com/pkg/errors"
-	"encoding/json"
-	"io/ioutil"
-	"crypto/tls"
-	"bytes"
-	"github.com/BurntSushi/toml"
+	"os"
 	"strings"
 )
 
