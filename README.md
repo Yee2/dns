@@ -5,7 +5,7 @@ DNS污染虽然很简单，但是却很管用，国内有很多无污染的DNS�
 ## 用法
 
 ```sh
-git clone git@github.com:Yee2/dns.git
+git clone https://github.com/Yee2/dns.git
 cd dns
 make
 ```
