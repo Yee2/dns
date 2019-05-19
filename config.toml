@@ -27,10 +27,6 @@ address = "223.5.5.5:53"
 method = "udp"
 
 [[rules]]
-name = "fqdn:hello.world"
-answer = "hello.world 3600 IN TXT \"世界那么大我想去看看\""
-
-[[rules]]
 name = "group:block"
 action = "reject"
 
@@ -62,3 +58,9 @@ list = [
 "www.facebook.com",
 "www.youtube.com",
 ]
+
+[[records]]
+name = "suffix:.onion"
+type = "A"
+ttl = 3600
+context = "127.0.0.1"

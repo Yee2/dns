@@ -11,6 +11,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
 	"io/ioutil"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -46,6 +47,51 @@ type Rule interface {
 	Match(address string) bool
 	dns.Handler
 }
+type DNSwriter struct {
+	origin dns.ResponseWriter
+	msg    *dns.Msg
+}
+
+func (r *DNSwriter) LocalAddr() net.Addr {
+	return r.origin.LocalAddr()
+}
+
+func (r *DNSwriter) RemoteAddr() net.Addr {
+	return r.origin.RemoteAddr()
+}
+
+func (r *DNSwriter) WriteMsg(msg *dns.Msg) error {
+	r.msg.Insert(msg.Answer)
+	logger.Debugf("answer:%s", msg.Answer[0].String())
+	return nil
+}
+
+func (*DNSwriter) Write([]byte) (int, error) {
+	panic("implement me")
+}
+
+func (r *DNSwriter) Close() error {
+	return nil
+}
+
+func (*DNSwriter) TsigStatus() error {
+	panic("implement me")
+}
+
+func (*DNSwriter) TsigTimersOnly(bool) {
+	panic("implement me")
+}
+
+func (*DNSwriter) Hijack() {
+	panic("implement me")
+}
+func (r *DNSwriter) Finish() error {
+	err := r.origin.WriteMsg(r.msg)
+	if err != nil {
+		return err
+	}
+	return r.origin.Close()
+}
 
 func main() {
 	app := &cli.App{Name: "DNS", Action: run, Flags: []cli.Flag{
@@ -65,16 +111,49 @@ func main() {
 type Rules []Rule
 
 func (rules Rules) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
-	defer w.Close()
 	if len(r.Question) == 0 {
-		w.WriteMsg(new(dns.Msg).SetRcodeFormatError(r))
+		//TODO: 记录错误信息
+		_ = w.WriteMsg(new(dns.Msg).SetRcodeFormatError(r))
 		return
 	}
 	logger.Debugf("handle:%s", r.Question[0].Name)
-	for _, item := range rules {
-		if item.Match(r.Question[0].Name) {
-			item.ServeDNS(w, r)
-			return
+	writer := &DNSwriter{origin: w, msg: r.Copy().SetReply(r)}
+	defer writer.Finish()
+	// TODO: 分解问题，优化成多个问题合并在一起
+LOOP:
+	for _, q := range r.Question {
+		// 第一步 查找 config.Records
+		logger.Debugf("query:%s", q.String())
+		for _, record := range config.Records {
+			if strings.ToUpper(record.Type) != dns.Type(q.Qtype).String() {
+				continue
+			}
+			if record.Match(q.Name) {
+				rr, err := record.RR()
+				msg := new(dns.Msg)
+				if err != nil {
+					// TODO:
+				} else {
+					rr.Header().Ttl = record.TTL
+					if rr.Header().Ttl == 0 {
+						rr.Header().Ttl = 3600
+					}
+					rr.Header().Name = q.Name
+					rr.Header().Rrtype = q.Qtype
+					msg.Answer = []dns.RR{rr}
+					writer.WriteMsg(msg)
+					continue LOOP
+				}
+			}
+		}
+		// 第二步 从外部查询记录
+		for _, item := range rules {
+			if item.Match(q.Name) {
+				c := r.Copy()
+				c.Question = []dns.Question{q}
+				item.ServeDNS(writer, c)
+				return
+			}
 		}
 	}
 }
@@ -130,12 +209,7 @@ func run(ctx *cli.Context) error {
 	for _, rule := range config.Rules {
 		var handler dns.Handler
 		var ok bool
-		if rule.Answer != "" {
-			handler, err = NewAnswer(rule.Answer)
-			if err != nil {
-				return errors.Wrap(err, "parse record failed")
-			}
-		} else if rule.Action == "reject" {
+		if rule.Action == "reject" {
 			handler = reject
 		} else {
 			handler, ok = handles[rule.Upstream]
@@ -393,27 +467,11 @@ func NewRuleGroup(name string, handler dns.Handler) (*RuleGroup, error) {
 
 }
 
-type Answer struct {
-	msg *dns.Msg
-}
-
-func (answer *Answer) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
-	w.WriteMsg(answer.msg.Copy().SetReply(r))
-}
-func NewAnswer(s string) (*Answer, error) {
-	rr, err := dns.NewRR(s)
-	if err != nil {
-		return nil, err
-	}
-	reply := &dns.Msg{Answer: []dns.RR{rr}}
-	return &Answer{reply}, nil
-}
-
 type Reject struct {
 }
 
 func (*Reject) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
-	w.WriteMsg(new(dns.Msg).SetRcode(r, dns.RcodeRefused))
+	_ = w.WriteMsg(new(dns.Msg).SetRcode(r, dns.RcodeRefused))
 }
 
 type RuleGroup struct {
