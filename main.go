@@ -61,8 +61,7 @@ func (r *DNSwriter) RemoteAddr() net.Addr {
 }
 
 func (r *DNSwriter) WriteMsg(msg *dns.Msg) error {
-	r.msg.Insert(msg.Answer)
-	logger.Debugf("answer:%s", msg.Answer[0].String())
+	r.msg.Answer = append(r.msg.Answer,msg.Answer...)
 	return nil
 }
 
