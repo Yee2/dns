@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/tls"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"github.com/BurntSushi/toml"
@@ -10,11 +12,13 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
+	"io"
 	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 )
 
@@ -22,7 +26,7 @@ var (
 	logger = &logrus.Logger{
 		Out:       os.Stdout,
 		Formatter: &logrus.TextFormatter{ForceColors: true},
-		Level:     logrus.InfoLevel,
+		Level:     logrus.DebugLevel,
 	}
 )
 
@@ -44,9 +48,12 @@ type Record struct {
 	Data string `json:"data"`
 }
 type Rule interface {
+	Name() string
 	Match(address string) bool
-	dns.Handler
+	Resolve(w dns.ResponseWriter, r *dns.Msg) bool
 }
+
+// 实现 dns.ResponseWriter 接口
 type DNSwriter struct {
 	origin dns.ResponseWriter
 	msg    *dns.Msg
@@ -61,7 +68,7 @@ func (r *DNSwriter) RemoteAddr() net.Addr {
 }
 
 func (r *DNSwriter) WriteMsg(msg *dns.Msg) error {
-	r.msg.Answer = append(r.msg.Answer,msg.Answer...)
+	r.msg.Answer = append(r.msg.Answer, msg.Answer...)
 	return nil
 }
 
@@ -96,7 +103,7 @@ func main() {
 	app := &cli.App{Name: "DNS", Action: run, Flags: []cli.Flag{
 		cli.StringFlag{
 			Name:  "config",
-			Value: "/etc/my-dns/config.toml",
+			Value: "config.toml",
 			Usage: "set the config.toml file path",
 		},
 	}}
@@ -147,11 +154,11 @@ LOOP:
 		}
 		// 第二步 从外部查询记录
 		for _, item := range rules {
-			if item.Match(q.Name) {
-				c := r.Copy()
-				c.Question = []dns.Question{q}
-				item.ServeDNS(writer, c)
-				return
+			c := r.Copy()
+			c.Question = []dns.Question{q}
+			if item.Match(q.Name) && item.Resolve(writer, c) {
+				logger.Debugf("Usage rules:%s", item.Name())
+				continue LOOP
 			}
 		}
 	}
@@ -221,6 +228,12 @@ func run(ctx *cli.Context) error {
 			return errors.Errorf("Match rule syntax error:%s", rule.Name)
 		}
 		switch array[0] {
+		case "iplist":
+			rule, err := NewIPList(array[1], handler)
+			if err != nil {
+				return errors.Errorf("Create rule error:%s", err)
+			}
+			rules = append(rules, rule)
 		case "prefix":
 			rules = append(rules, &RuleSimple{rule: array[1], method: prefix, Handler: handler})
 		case "suffix":
@@ -258,6 +271,139 @@ func run(ctx *cli.Context) error {
 	err = <-errorChanel
 	return err
 }
+
+func NewIPList(file string, handle dns.Handler) (*IPList, error) {
+	f, err := os.Open(file)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	reader := bufio.NewReader(f)
+	r := &IPList{make([]*net.IPNet, 0), handle}
+	for {
+		line, _, err := reader.ReadLine()
+		if err == io.EOF {
+			break
+		}
+		_, ipnet, err := net.ParseCIDR(string(line))
+		if err != nil {
+			fmt.Printf("解析IP出现错误:%s\n", err)
+			continue
+		}
+		r.list = append(r.list, ipnet)
+	}
+	sort.Sort(r)
+	return r, nil
+}
+
+type IPList struct {
+	list   []*net.IPNet
+	handle dns.Handler
+}
+
+func (that *IPList) Name() string {
+	return "ipList"
+}
+
+func (that *IPList) Len() int {
+	return len(that.list)
+}
+
+func (that *IPList) Less(i, j int) bool {
+	return binary.BigEndian.Uint32(that.list[i].IP) < binary.BigEndian.Uint32(that.list[j].IP)
+}
+
+func (that *IPList) Swap(i, j int) {
+	that.list[i], that.list[j] = that.list[j], that.list[i]
+}
+
+func (that *IPList) Match(address string) bool {
+	return true
+}
+func (that *IPList) Contains(ip dns.RR) bool {
+	if _, ok := ip.(*dns.CNAME); ok {
+		return true
+	}
+	record, ok := ip.(*dns.A)
+	if !ok {
+		return false
+	}
+	list := that.list
+	for {
+		key := len(list) / 2
+		if list[key].Contains(record.A) {
+			return true
+		}
+		if binary.BigEndian.Uint32(record.A.Mask(list[key].Mask)) > binary.BigEndian.Uint32(list[key].IP) {
+			list = list[key+1:]
+		} else {
+			list = list[:key]
+		}
+		if len(list) == 0 {
+			return false
+		}
+	}
+}
+
+func (that *IPList) Resolve(w dns.ResponseWriter, r *dns.Msg) (ok bool) {
+	defer func() {
+		r := recover()
+		if r != nil {
+			ok = false
+		}
+	}()
+	writer := &IPListWriter{answers: make([]dns.RR, 0)}
+	that.handle.ServeDNS(writer, r)
+	for _, rr := range writer.answers {
+		if ! that.Contains(rr) {
+			return false
+		}
+	}
+	c := r.Copy().SetReply(r)
+	c.Answer = writer.answers
+	if w.WriteMsg(c) != nil {
+		return false
+	}
+	return true
+}
+
+type IPListWriter struct {
+	answers []dns.RR
+}
+
+func (t *IPListWriter) LocalAddr() net.Addr {
+	panic("implement me")
+}
+
+func (t *IPListWriter) RemoteAddr() net.Addr {
+	panic("implement me")
+}
+
+func (t *IPListWriter) WriteMsg(m *dns.Msg) error {
+	t.answers = append(t.answers, m.Answer...)
+	return nil
+}
+
+func (t *IPListWriter) Write([]byte) (int, error) {
+	panic("implement me")
+}
+
+func (t *IPListWriter) Close() error {
+	panic("implement me")
+}
+
+func (t *IPListWriter) TsigStatus() error {
+	panic("implement me")
+}
+
+func (t *IPListWriter) TsigTimersOnly(bool) {
+	panic("implement me")
+}
+
+func (t *IPListWriter) Hijack() {
+	panic("implement me")
+}
+
 func NewDoH(address string, method string) (*DoH, error) {
 	if method != "doh-json" && method != "doh-wireformat" && method != "" {
 		return nil, errors.Errorf("错误的方式")
@@ -404,6 +550,7 @@ type MatchType uint8
 const (
 	prefix MatchType = iota
 	suffix
+	ip
 	contain
 	fqdn
 	other
@@ -413,6 +560,15 @@ type RuleSimple struct {
 	rule   string
 	method MatchType
 	dns.Handler
+}
+
+func (p *RuleSimple) Name() string {
+	return fmt.Sprintf("RuleSimple")
+}
+
+func (p *RuleSimple) Resolve(w dns.ResponseWriter, r *dns.Msg) bool {
+	p.ServeDNS(w, r)
+	return true
 }
 
 func (p *RuleSimple) Match(address string) bool {
@@ -476,6 +632,15 @@ func (*Reject) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 type RuleGroup struct {
 	dict map[string]struct{}
 	dns.Handler
+}
+
+func (g *RuleGroup) Name() string {
+	return "ruleGroup"
+}
+
+func (g *RuleGroup) Resolve(w dns.ResponseWriter, r *dns.Msg) bool {
+	g.ServeDNS(w, r)
+	return true
 }
 
 func (r *RuleGroup) Match(address string) bool {

@@ -1,10 +1,10 @@
 [[listen]]
 type = "tcp"
-address = "localhost:53"
+address = "0.0.0.0:5353"
 
 [[listen]]
 type = "udp"
-address = "localhost:53"
+address = "0.0.0.0:5353"
 
 [[upstreams]]
 name = "google"
@@ -27,6 +27,10 @@ address = "223.5.5.5:53"
 method = "udp"
 
 [[rules]]
+name = "iplist:ip.txt"
+upstream = "aliyun"
+
+[[rules]]
 name = "group:block"
 action = "reject"
 
@@ -39,25 +43,14 @@ name = "fqdn:dns.google.com"
 upstream = "cloudflare"
 
 [[rules]]
-name = "suffix:.bilibili.com"
-upstream = "aliyun"
-
-[[rules]]
 name = "other"
 upstream = "cloudflare"
 
 [Groups.block]
-list = [
-"www.baidu.com",
-]
+list = []
 
 [Groups.gfwlist]
-list = [
-"www.bilibili.com",
-"www.google.com",
-"www.facebook.com",
-"www.youtube.com",
-]
+list = []
 
 [[records]]
 name = "suffix:.onion"
