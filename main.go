@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -172,6 +173,7 @@ func run(ctx *cli.Context) error {
 	if err := toml.Unmarshal(data, &config); err != nil {
 		return errors.Wrapf(err, "Unable to parse configuration file(%s)", ctx.String("config"))
 	}
+	config.Path, _ = filepath.Abs(ctx.String("config"))
 	logger.Debugf("%+v", config)
 	handles := make(map[string]dns.Handler)
 	reject := &Reject{}
@@ -273,6 +275,9 @@ func run(ctx *cli.Context) error {
 }
 
 func NewIPList(file string, handle dns.Handler) (*IPList, error) {
+	if !filepath.IsAbs(file) {
+		file = filepath.Join(filepath.Dir(config.Path), file)
+	}
 	f, err := os.Open(file)
 	if err != nil {
 		return nil, err
@@ -355,7 +360,7 @@ func (that *IPList) Resolve(w dns.ResponseWriter, r *dns.Msg) (ok bool) {
 	writer := &IPListWriter{answers: make([]dns.RR, 0)}
 	that.handle.ServeDNS(writer, r)
 	for _, rr := range writer.answers {
-		if ! that.Contains(rr) {
+		if !that.Contains(rr) {
 			return false
 		}
 	}
@@ -588,6 +593,13 @@ func (p *RuleSimple) Match(address string) bool {
 	}
 }
 func NewDNS(address, method string) (*DNS, error) {
+	_, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, fmt.Errorf("parsing address error:%w", err)
+	}
+	if port == "" {
+		address = net.JoinHostPort(address, "53")
+	}
 	if method != "" && method != "tcp" && method != "udp" && method != "tcp-tls" {
 		return nil, errors.Errorf("Unregistered query method:%s", method)
 	}
