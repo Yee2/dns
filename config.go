@@ -8,6 +8,7 @@ import (
 )
 
 var config = struct {
+	Path    string
 	Servers []struct {
 		Type    string `toml:"type"`
 		Address string `toml:"address"`
