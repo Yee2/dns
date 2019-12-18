@@ -7,6 +7,8 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"github.com/AdguardTeam/urlfilter"
+	"github.com/AdguardTeam/urlfilter/filterlist"
 	"github.com/BurntSushi/toml"
 	"github.com/miekg/dns"
 	"github.com/pkg/errors"
@@ -50,7 +52,7 @@ type Record struct {
 }
 type Rule interface {
 	Name() string
-	Match(address string) bool
+	Match(qType uint16, address string) bool
 	Resolve(w dns.ResponseWriter, r *dns.Msg) bool
 }
 
@@ -128,14 +130,14 @@ func (rules Rules) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	defer writer.Finish()
 	// TODO: 分解问题，优化成多个问题合并在一起
 LOOP:
-	for _, q := range r.Question {
+	for _, question := range r.Question {
 		// 第一步 查找 config.Records
-		logger.Debugf("query:%s", q.String())
+		logger.Debugf("query:%s", question.String())
 		for _, record := range config.Records {
-			if strings.ToUpper(record.Type) != dns.Type(q.Qtype).String() {
+			if strings.ToUpper(record.Type) != dns.Type(question.Qtype).String() {
 				continue
 			}
-			if record.Match(q.Name) {
+			if record.Match(question.Name) {
 				rr, err := record.RR()
 				msg := new(dns.Msg)
 				if err != nil {
@@ -145,8 +147,8 @@ LOOP:
 					if rr.Header().Ttl == 0 {
 						rr.Header().Ttl = 3600
 					}
-					rr.Header().Name = q.Name
-					rr.Header().Rrtype = q.Qtype
+					rr.Header().Name = question.Name
+					rr.Header().Rrtype = question.Qtype
 					msg.Answer = []dns.RR{rr}
 					writer.WriteMsg(msg)
 					continue LOOP
@@ -156,8 +158,8 @@ LOOP:
 		// 第二步 从外部查询记录
 		for _, item := range rules {
 			c := r.Copy()
-			c.Question = []dns.Question{q}
-			if item.Match(q.Name) && item.Resolve(writer, c) {
+			c.Question = []dns.Question{question}
+			if item.Match(question.Qtype, question.Name) && item.Resolve(writer, c) {
 				logger.Debugf("Usage rules:%s", item.Name())
 				continue LOOP
 			}
@@ -230,6 +232,12 @@ func run(ctx *cli.Context) error {
 			return errors.Errorf("Match rule syntax error:%s", rule.Name)
 		}
 		switch array[0] {
+		case "adblock":
+			rule, err := NewAdBlock(array[1], handler)
+			if err != nil {
+				return errors.Errorf("Create rule error:%s", err)
+			}
+			rules = append(rules, rule)
 		case "iplist":
 			rule, err := NewIPList(array[1], handler)
 			if err != nil {
@@ -274,6 +282,41 @@ func run(ctx *cli.Context) error {
 	return err
 }
 
+type AdBlock struct {
+	filter *urlfilter.DNSEngine
+	handle dns.Handler
+}
+
+func (a *AdBlock) Name() string {
+	return "adBlock"
+}
+
+// TODO: 实现 `HostRule`
+func (a *AdBlock) Match(_ uint16, address string) bool {
+	_, ok := a.filter.Match(strings.TrimSuffix(address,"."))
+	return ok
+}
+
+func (a *AdBlock) Resolve(w dns.ResponseWriter, r *dns.Msg) (ok bool) {
+	a.handle.ServeDNS(w, r)
+	return true
+}
+
+func NewAdBlock(file string, handle dns.Handler) (*AdBlock, error) {
+	if !filepath.IsAbs(file) {
+		file = filepath.Join(filepath.Dir(config.Path), file)
+	}
+	list, err := filterlist.NewFileRuleList(0, file, true)
+	if err != nil {
+		return nil, fmt.Errorf("filterlist.NewFileRuleList(): %s: %s", file, err)
+	}
+	rulesStorage, err := filterlist.NewRuleStorage([]filterlist.RuleList{list})
+	if err != nil {
+		return nil, fmt.Errorf("filterlist.NewRuleStorage(): %s", err)
+	}
+	filteringEngine := urlfilter.NewDNSEngine(rulesStorage)
+	return &AdBlock{filter: filteringEngine, handle: handle}, nil
+}
 func NewIPList(file string, handle dns.Handler) (*IPList, error) {
 	if !filepath.IsAbs(file) {
 		file = filepath.Join(filepath.Dir(config.Path), file)
@@ -322,10 +365,12 @@ func (that *IPList) Swap(i, j int) {
 	that.list[i], that.list[j] = that.list[j], that.list[i]
 }
 
-func (that *IPList) Match(address string) bool {
-	return true
+func (that *IPList) Match(qtype uint16, address string) bool {
+	return qtype != dns.TypeA || qtype != dns.TypeAAAA
 }
+
 func (that *IPList) Contains(ip dns.RR) bool {
+	//TODO: 添加对 IPv6 的支持
 	if _, ok := ip.(*dns.CNAME); ok {
 		return true
 	}
@@ -576,7 +621,7 @@ func (p *RuleSimple) Resolve(w dns.ResponseWriter, r *dns.Msg) bool {
 	return true
 }
 
-func (p *RuleSimple) Match(address string) bool {
+func (p *RuleSimple) Match(_ uint16, address string) bool {
 	switch p.method {
 	case prefix:
 		return strings.HasPrefix(address, p.rule)
@@ -655,7 +700,7 @@ func (g *RuleGroup) Resolve(w dns.ResponseWriter, r *dns.Msg) bool {
 	return true
 }
 
-func (r *RuleGroup) Match(address string) bool {
+func (r *RuleGroup) Match(_ uint16, address string) bool {
 	_, ok := r.dict[address]
 	return ok
 }

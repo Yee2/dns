@@ -27,6 +27,10 @@ address = "223.5.5.5:53"
 method = "udp"
 
 [[rules]]
+name = "adblock:filter.txt"
+action = "reject"
+
+[[rules]]
 name = "iplist:ip.txt"
 upstream = "aliyun"
 
