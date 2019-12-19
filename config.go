@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"github.com/miekg/dns"
 	"net"
-	"strings"
 )
 
 var config = struct {
@@ -39,45 +38,25 @@ type lRecord struct {
 }
 
 func (r lRecord) RR() (rr dns.RR, e error) {
-	switch strings.ToUpper(r.Type) {
+	if _, is := dns.IsDomainName(r.Name); !is {
+		return nil, fmt.Errorf("invalid domain name:%s", r.Name)
+	}
+	switch r.Type {
 	case "A":
 		ip := net.ParseIP(r.Context)
-		return &dns.A{A: ip.To4()}, nil
+		return &dns.A{Hdr: dns.RR_Header{Ttl: r.TTL}, A: ip.To4()}, nil
 	case "AAAA":
 		ip := net.ParseIP(r.Context)
-		return &dns.A{A: ip.To16()}, nil
+		return &dns.A{Hdr: dns.RR_Header{Ttl: r.TTL}, A: ip.To16()}, nil
 	case "TXT":
-		return &dns.TXT{Txt: []string{r.Context}}, nil
+		return &dns.TXT{Hdr: dns.RR_Header{Ttl: r.TTL}, Txt: []string{r.Context}}, nil
 	case "MX":
-		return &dns.MX{Mx: r.Context, Preference: r.Priority}, nil
+		return &dns.MX{Hdr: dns.RR_Header{Ttl: r.TTL}, Mx: r.Context, Preference: r.Priority}, nil
 	case "NS":
-		return &dns.NS{Ns: r.Context}, nil
+		return &dns.NS{Hdr: dns.RR_Header{Ttl: r.TTL}, Ns: r.Context}, nil
 	case "CNAME":
-		return &dns.CNAME{Target: r.Context}, nil
+		return &dns.CNAME{Hdr: dns.RR_Header{Ttl: r.TTL}, Target: r.Context}, nil
 	default:
 		return nil, fmt.Errorf("not supported:%s", r.Type)
-	}
-}
-
-func (r lRecord) Match(address string) bool {
-	if address == "other" {
-		return true
-	}
-	array := strings.SplitN(r.Name, ":", 2)
-	if len(array) != 2 {
-		return false
-	}
-	switch array[0] {
-	case "prefix":
-		return strings.HasPrefix(address, array[1])
-	case "suffix":
-		return strings.HasSuffix(dns.Fqdn(address), dns.Fqdn(array[1]))
-	case "contain":
-		return strings.Contains(address, array[1])
-	case "fqdn":
-		return address == dns.Fqdn(array[1])
-	default:
-		logger.Warnf("Unknown match rule:%s", array[0])
-		return false
 	}
 }

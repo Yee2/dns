@@ -16,6 +16,7 @@ import (
 	"github.com/urfave/cli"
 	"io"
 	"io/ioutil"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
@@ -23,6 +24,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 var (
@@ -52,57 +54,13 @@ type Record struct {
 }
 type Rule interface {
 	Name() string
-	Match(qType uint16, address string) bool
-	Resolve(w dns.ResponseWriter, r *dns.Msg) bool
-}
-
-// 实现 dns.ResponseWriter 接口
-type DNSwriter struct {
-	origin dns.ResponseWriter
-	msg    *dns.Msg
-}
-
-func (r *DNSwriter) LocalAddr() net.Addr {
-	return r.origin.LocalAddr()
-}
-
-func (r *DNSwriter) RemoteAddr() net.Addr {
-	return r.origin.RemoteAddr()
-}
-
-func (r *DNSwriter) WriteMsg(msg *dns.Msg) error {
-	r.msg.Answer = append(r.msg.Answer, msg.Answer...)
-	return nil
-}
-
-func (*DNSwriter) Write([]byte) (int, error) {
-	panic("implement me")
-}
-
-func (r *DNSwriter) Close() error {
-	return nil
-}
-
-func (*DNSwriter) TsigStatus() error {
-	panic("implement me")
-}
-
-func (*DNSwriter) TsigTimersOnly(bool) {
-	panic("implement me")
-}
-
-func (*DNSwriter) Hijack() {
-	panic("implement me")
-}
-func (r *DNSwriter) Finish() error {
-	err := r.origin.WriteMsg(r.msg)
-	if err != nil {
-		return err
-	}
-	return r.origin.Close()
+	Match(q dns.Question) bool
+	Handler
 }
 
 func main() {
+	rand.Seed(time.Now().UnixNano())
+
 	app := &cli.App{Name: "DNS", Action: run, Flags: []cli.Flag{
 		cli.StringFlag{
 			Name:  "config",
@@ -117,55 +75,73 @@ func main() {
 	}
 }
 
-type Rules []Rule
+type Rules struct {
+	list    []Rule
+	records []dns.RR
+}
 
-func (rules Rules) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
-	if len(r.Question) == 0 {
+func (rules *Rules) ServeDNS(w dns.ResponseWriter, request *dns.Msg) {
+	if len(request.Question) == 0 {
 		//TODO: 记录错误信息
-		_ = w.WriteMsg(new(dns.Msg).SetRcodeFormatError(r))
+		_ = w.WriteMsg(new(dns.Msg).SetRcodeFormatError(request))
 		return
 	}
-	logger.Debugf("handle:%s", r.Question[0].Name)
-	writer := &DNSwriter{origin: w, msg: r.Copy().SetReply(r)}
-	defer writer.Finish()
-	// TODO: 分解问题，优化成多个问题合并在一起
-LOOP:
-	for _, question := range r.Question {
+	reply := request.Copy()
+	for _, question := range request.Question {
 		// 第一步 查找 config.Records
 		logger.Debugf("query:%s", question.String())
-		for _, record := range config.Records {
-			if strings.ToUpper(record.Type) != dns.Type(question.Qtype).String() {
-				continue
-			}
-			if record.Match(question.Name) {
-				rr, err := record.RR()
-				msg := new(dns.Msg)
-				if err != nil {
-					// TODO:
-				} else {
-					rr.Header().Ttl = record.TTL
-					if rr.Header().Ttl == 0 {
-						rr.Header().Ttl = 3600
-					}
-					rr.Header().Name = question.Name
-					rr.Header().Rrtype = question.Qtype
-					msg.Answer = []dns.RR{rr}
-					writer.WriteMsg(msg)
-					continue LOOP
-				}
-			}
+		if msg, ok := rules.local(question); ok {
+			reply.Answer = append(reply.Answer, msg.Answer...)
+			continue
 		}
 		// 第二步 从外部查询记录
-		for _, item := range rules {
-			c := r.Copy()
-			c.Question = []dns.Question{question}
-			if item.Match(question.Qtype, question.Name) && item.Resolve(writer, c) {
-				logger.Debugf("Usage rules:%s", item.Name())
-				continue LOOP
-			}
+		if result, ok := rules.resolve(question); ok {
+			reply.Answer = append(reply.Answer, result.Answer...)
+			reply.Ns = append(reply.Ns, result.Ns...)
+			reply.Extra = append(reply.Extra, result.Extra...)
+			continue
 		}
 	}
+	reply.SetReply(request)
+	w.WriteMsg(reply)
 }
+func (rules *Rules) local(question dns.Question) (msg *dns.Msg, ok bool) {
+	for _, record := range rules.records {
+		if record.Header().Rrtype != question.Qtype {
+			continue
+		}
+		if record.Header().Name == question.Name {
+			msg := new(dns.Msg)
+			msg.Answer = []dns.RR{record}
+			return msg, true
+		}
+	}
+	return nil, false
+}
+func (rules *Rules) resolve(question dns.Question) (result *dns.Msg, ok bool) {
+	msg := new(dns.Msg)
+	msg.Question = []dns.Question{question}
+	for _, item := range rules.list {
+		if !item.Match(question) {
+			continue
+		}
+		logger.Debugf("try %s", item.Name())
+		msg.MsgHdr.Id = uint16(rand.Int())
+		if reply, err := item.Exchange(msg); err != nil {
+			logger.Debugf("exchange error:%s", err)
+			continue
+		} else {
+			logger.Debug("usage %s", item.Name())
+			return reply, true
+		}
+	}
+	return nil, false
+}
+
+type Handler interface {
+	Exchange(m *dns.Msg) (r *dns.Msg, err error)
+}
+
 func run(ctx *cli.Context) error {
 	data, err := ioutil.ReadFile(ctx.String("config"))
 	if err != nil {
@@ -177,7 +153,7 @@ func run(ctx *cli.Context) error {
 	}
 	config.Path, _ = filepath.Abs(ctx.String("config"))
 	logger.Debugf("%+v", config)
-	handles := make(map[string]dns.Handler)
+	handles := make(map[string]Handler)
 	reject := &Reject{}
 	for _, upstream := range config.Upstreams {
 		switch upstream.Method {
@@ -215,9 +191,17 @@ func run(ctx *cli.Context) error {
 			return errors.Errorf("Unregistered query method:%s", upstream.Method)
 		}
 	}
-	rules := make(Rules, 0)
+	rules := &Rules{list: make([]Rule, 0), records: make([]dns.RR, 0)}
+	// 加载本地的记录
+	for _, r := range config.Records {
+		rr, err := r.RR()
+		if err != nil {
+			return err
+		}
+		rules.records = append(rules.records, rr)
+	}
 	for _, rule := range config.Rules {
-		var handler dns.Handler
+		var handler Handler
 		var ok bool
 		if rule.Action == "reject" {
 			handler = reject
@@ -237,29 +221,29 @@ func run(ctx *cli.Context) error {
 			if err != nil {
 				return errors.Errorf("Create rule error:%s", err)
 			}
-			rules = append(rules, rule)
+			rules.list = append(rules.list, rule)
 		case "iplist":
 			rule, err := NewIPList(array[1], handler)
 			if err != nil {
 				return errors.Errorf("Create rule error:%s", err)
 			}
-			rules = append(rules, rule)
+			rules.list = append(rules.list, rule)
 		case "prefix":
-			rules = append(rules, &RuleSimple{rule: array[1], method: prefix, Handler: handler})
+			rules.list = append(rules.list, &RuleSimple{rule: array[1], method: prefix, Handler: handler})
 		case "suffix":
-			rules = append(rules, &RuleSimple{rule: array[1], method: suffix, Handler: handler})
+			rules.list = append(rules.list, &RuleSimple{rule: array[1], method: suffix, Handler: handler})
 		case "contain":
-			rules = append(rules, &RuleSimple{rule: array[1], method: contain, Handler: handler})
+			rules.list = append(rules.list, &RuleSimple{rule: array[1], method: contain, Handler: handler})
 		case "fqdn":
-			rules = append(rules, &RuleSimple{rule: array[1], method: fqdn, Handler: handler})
+			rules.list = append(rules.list, &RuleSimple{rule: array[1], method: fqdn, Handler: handler})
 		case "other":
-			rules = append(rules, &RuleSimple{method: other, Handler: handler})
+			rules.list = append(rules.list, &RuleSimple{method: other, Handler: handler})
 		case "group":
 			rule, err := NewRuleGroup(array[1], handler)
 			if err != nil {
 				return err
 			}
-			rules = append(rules, rule)
+			rules.list = append(rules.list, rule)
 		default:
 			return errors.Errorf("Unregistered match:%s", rule.Name)
 		}
@@ -283,26 +267,24 @@ func run(ctx *cli.Context) error {
 }
 
 type AdBlock struct {
+	file   string
 	filter *urlfilter.DNSEngine
-	handle dns.Handler
+	Handler
 }
 
 func (a *AdBlock) Name() string {
-	return "adBlock"
+	return "adBlock - " + a.file
 }
 
 // TODO: 实现 `HostRule`
-func (a *AdBlock) Match(_ uint16, address string) bool {
-	_, ok := a.filter.Match(strings.TrimSuffix(address,"."))
+func (a *AdBlock) Match(question dns.Question) bool {
+	_, ok := a.filter.Match(strings.TrimSuffix(question.Name, "."))
 	return ok
 }
 
-func (a *AdBlock) Resolve(w dns.ResponseWriter, r *dns.Msg) (ok bool) {
-	a.handle.ServeDNS(w, r)
-	return true
-}
-
-func NewAdBlock(file string, handle dns.Handler) (*AdBlock, error) {
+// TODO: 解除文件占用
+func NewAdBlock(file string, handle Handler) (*AdBlock, error) {
+	o := file
 	if !filepath.IsAbs(file) {
 		file = filepath.Join(filepath.Dir(config.Path), file)
 	}
@@ -315,9 +297,9 @@ func NewAdBlock(file string, handle dns.Handler) (*AdBlock, error) {
 		return nil, fmt.Errorf("filterlist.NewRuleStorage(): %s", err)
 	}
 	filteringEngine := urlfilter.NewDNSEngine(rulesStorage)
-	return &AdBlock{filter: filteringEngine, handle: handle}, nil
+	return &AdBlock{file: o, filter: filteringEngine, Handler: handle}, nil
 }
-func NewIPList(file string, handle dns.Handler) (*IPList, error) {
+func NewIPList(file string, handle Handler) (*IPList, error) {
 	if !filepath.IsAbs(file) {
 		file = filepath.Join(filepath.Dir(config.Path), file)
 	}
@@ -345,8 +327,8 @@ func NewIPList(file string, handle dns.Handler) (*IPList, error) {
 }
 
 type IPList struct {
-	list   []*net.IPNet
-	handle dns.Handler
+	list []*net.IPNet
+	Handler
 }
 
 func (that *IPList) Name() string {
@@ -365,8 +347,8 @@ func (that *IPList) Swap(i, j int) {
 	that.list[i], that.list[j] = that.list[j], that.list[i]
 }
 
-func (that *IPList) Match(qtype uint16, address string) bool {
-	return qtype != dns.TypeA || qtype != dns.TypeAAAA
+func (that *IPList) Match(question dns.Question) bool {
+	return question.Qtype != dns.TypeA || question.Qtype != dns.TypeAAAA
 }
 
 func (that *IPList) Contains(ip dns.RR) bool {
@@ -379,6 +361,9 @@ func (that *IPList) Contains(ip dns.RR) bool {
 		return false
 	}
 	list := that.list
+	if len(list) == 0 {
+		return false
+	}
 	for {
 		key := len(list) / 2
 		if list[key].Contains(record.A) {
@@ -395,63 +380,17 @@ func (that *IPList) Contains(ip dns.RR) bool {
 	}
 }
 
-func (that *IPList) Resolve(w dns.ResponseWriter, r *dns.Msg) (ok bool) {
-	defer func() {
-		r := recover()
-		if r != nil {
-			ok = false
-		}
-	}()
-	writer := &IPListWriter{answers: make([]dns.RR, 0)}
-	that.handle.ServeDNS(writer, r)
-	for _, rr := range writer.answers {
+func (that *IPList) Exchange(msg *dns.Msg) (r *dns.Msg, err error) {
+	reply, err := that.Handler.Exchange(msg)
+	if err != nil {
+		return nil, err
+	}
+	for _, rr := range reply.Answer {
 		if !that.Contains(rr) {
-			return false
+			return nil, fmt.Errorf("next")
 		}
 	}
-	c := r.Copy().SetReply(r)
-	c.Answer = writer.answers
-	if w.WriteMsg(c) != nil {
-		return false
-	}
-	return true
-}
-
-type IPListWriter struct {
-	answers []dns.RR
-}
-
-func (t *IPListWriter) LocalAddr() net.Addr {
-	panic("implement me")
-}
-
-func (t *IPListWriter) RemoteAddr() net.Addr {
-	panic("implement me")
-}
-
-func (t *IPListWriter) WriteMsg(m *dns.Msg) error {
-	t.answers = append(t.answers, m.Answer...)
-	return nil
-}
-
-func (t *IPListWriter) Write([]byte) (int, error) {
-	panic("implement me")
-}
-
-func (t *IPListWriter) Close() error {
-	panic("implement me")
-}
-
-func (t *IPListWriter) TsigStatus() error {
-	panic("implement me")
-}
-
-func (t *IPListWriter) TsigTimersOnly(bool) {
-	panic("implement me")
-}
-
-func (t *IPListWriter) Hijack() {
-	panic("implement me")
+	return reply, nil
 }
 
 func NewDoH(address string, method string) (*DoH, error) {
@@ -480,55 +419,45 @@ type DoH struct {
 	method  uint8
 }
 
-func (that *DoH) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
+func (that *DoH) Exchange(m *dns.Msg) (r *dns.Msg, err error) {
 	if that.method == 0 {
-		that.json(w, r)
+		return that.json(m)
 	} else {
-		that.wireformat(w, r)
+		return that.wireformat(m)
 	}
 }
 
-func (that *DoH) wireformat(w dns.ResponseWriter, r *dns.Msg) {
+func (that *DoH) wireformat(r *dns.Msg) (response *dns.Msg, err error) {
 	raw, err := r.Pack()
 	if err != nil {
-		logger.Warnf("failed to pack dns query:%s", err)
-		w.WriteMsg(new(dns.Msg).SetRcodeFormatError(r))
-		return
+		return nil, fmt.Errorf("failed to pack dns query:%w", err)
 	}
 	request, err := http.NewRequest("POST", that.address, bytes.NewBuffer(raw))
+	if err != nil {
+		return nil, err
+	}
 	request.Header.Add("Content-Type", "application/dns-udpwireformat")
 	request.Header.Add("accept", "application/dns-message")
 	resp, err := that.client.Do(request)
 	if err != nil {
-		logger.Warn(errors.Wrap(err, "dns-over-https"))
-		w.WriteMsg(new(dns.Msg).SetRcode(r, dns.RcodeServerFailure))
-		return
+		return nil, fmt.Errorf("dns-over-https:%w", err)
 	}
 	if resp.StatusCode != 200 {
-		logger.Warn(errors.Wrapf(err, "dns-over-https error code %d", resp.StatusCode))
-		w.WriteMsg(new(dns.Msg).SetRcode(r, dns.RcodeServerFailure))
-		return
+		return nil, fmt.Errorf("dns-over-https error code %d", resp.StatusCode)
 	}
 	defer resp.Body.Close()
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		logger.Warn(errors.Wrapf(err, "dns-over-https"))
-		w.WriteMsg(new(dns.Msg).SetRcode(r, dns.RcodeServerFailure))
-		return
+		return nil, fmt.Errorf("dns-over-https:%w", err)
 	}
 	reply := new(dns.Msg)
 	if err := reply.Unpack(body); err != nil {
-		logger.Warn(errors.Wrapf(err, "failed to unpack dns response"))
-		w.WriteMsg(new(dns.Msg).SetRcode(r, dns.RcodeServerFailure))
-		return
+		return nil, fmt.Errorf("failed to unpack dns response:%w", err)
 	}
-	reply.SetReply(r)
-	for _, answer := range reply.Answer {
-		logger.Info(answer)
-	}
-	w.WriteMsg(reply)
+	return reply, nil
 }
-func (that *DoH) json(w dns.ResponseWriter, r *dns.Msg) {
+func (that *DoH) json(r *dns.Msg) (*dns.Msg, error) {
+	// TODO: 修正
 	records := make([]dns.RR, 0)
 	for _, question := range r.Question {
 		u := fmt.Sprintf("%s?name=%s&type=%d", that.address,
@@ -576,7 +505,7 @@ func (that *DoH) json(w dns.ResponseWriter, r *dns.Msg) {
 			logger.Info(record)
 			rr, err := dns.NewRR(record)
 			if err != nil {
-				logger.Warn(errors.Wrapf(err, "dns-over-https error answer:%s",
+				logger.Warn(errors.Wrapf(err, "dns-over-https error Answer:%s",
 					fmt.Sprintf("%s %d IN %s %s",
 						question.Name, answer.TTL, dns.Type(answer.Type), answer.Data)))
 				continue
@@ -589,10 +518,8 @@ func (that *DoH) json(w dns.ResponseWriter, r *dns.Msg) {
 	reply := &dns.Msg{Answer: records}
 	if len(records) == 0 {
 		reply.SetRcode(r, dns.RcodeServerFailure)
-	} else {
-		reply.SetReply(r)
 	}
-	w.WriteMsg(reply)
+	return reply, nil
 }
 
 type MatchType uint8
@@ -609,19 +536,29 @@ const (
 type RuleSimple struct {
 	rule   string
 	method MatchType
-	dns.Handler
+	Handler
 }
 
 func (p *RuleSimple) Name() string {
+	switch p.method {
+	case contain:
+		return fmt.Sprintf("RuleSimple - contain")
+	case fqdn:
+		return fmt.Sprintf("RuleSimple - FQDN")
+	case ip:
+		return fmt.Sprintf("RuleSimple - IP")
+	case other:
+		return fmt.Sprintf("RuleSimple - other")
+	case suffix:
+		return fmt.Sprintf("RuleSimple - suffix")
+	case prefix:
+		return fmt.Sprintf("RuleSimple - prefix")
+	}
 	return fmt.Sprintf("RuleSimple")
 }
 
-func (p *RuleSimple) Resolve(w dns.ResponseWriter, r *dns.Msg) bool {
-	p.ServeDNS(w, r)
-	return true
-}
-
-func (p *RuleSimple) Match(_ uint16, address string) bool {
+func (p *RuleSimple) Match(question dns.Question) bool {
+	address := question.Name
 	switch p.method {
 	case prefix:
 		return strings.HasPrefix(address, p.rule)
@@ -656,16 +593,15 @@ type DNS struct {
 	client  *dns.Client
 }
 
-func (s *DNS) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
-	reply, _, err := s.client.Exchange(r, s.address)
+func (s *DNS) Exchange(msg *dns.Msg) (reply *dns.Msg, err error) {
+	reply, _, err = s.client.Exchange(msg, s.address)
 	if err != nil {
-		w.WriteMsg(new(dns.Msg).SetRcode(r, 2))
-		logger.Warn(err)
-		return
+		return nil, err
 	}
-	w.WriteMsg(reply.SetReply(r))
+	return reply, err
 }
-func NewRuleGroup(name string, handler dns.Handler) (*RuleGroup, error) {
+
+func NewRuleGroup(name string, handler Handler) (*RuleGroup, error) {
 	list, ok := config.Groups[name]
 	if !ok {
 		logger.Debugf("%+v", config.Groups)
@@ -682,25 +618,20 @@ func NewRuleGroup(name string, handler dns.Handler) (*RuleGroup, error) {
 type Reject struct {
 }
 
-func (*Reject) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
-	_ = w.WriteMsg(new(dns.Msg).SetRcode(r, dns.RcodeRefused))
+func (r2 *Reject) Exchange(m *dns.Msg) (r *dns.Msg, err error) {
+	return new(dns.Msg).SetRcode(r, dns.RcodeRefused), nil
 }
 
 type RuleGroup struct {
 	dict map[string]struct{}
-	dns.Handler
+	Handler
 }
 
 func (g *RuleGroup) Name() string {
 	return "ruleGroup"
 }
 
-func (g *RuleGroup) Resolve(w dns.ResponseWriter, r *dns.Msg) bool {
-	g.ServeDNS(w, r)
-	return true
-}
-
-func (r *RuleGroup) Match(_ uint16, address string) bool {
-	_, ok := r.dict[address]
+func (g *RuleGroup) Match(question dns.Question) bool {
+	_, ok := g.dict[question.Name]
 	return ok
 }
