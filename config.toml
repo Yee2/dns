@@ -2,10 +2,6 @@
 type = "tcp"
 address = "0.0.0.0:5353"
 
-[[listen]]
-type = "udp"
-address = "0.0.0.0:5353"
-
 [[upstreams]]
 name = "google"
 address = "https://dns.google.com/resolve"
@@ -22,6 +18,11 @@ address = "1.1.1.1:53"
 method = "tcp"
 
 [[upstreams]]
+name = "FuzhouTelecom"
+address = "223.5.5.5:53"
+method = "udp"
+
+[[upstreams]]
 name = "aliyun"
 address = "223.5.5.5:53"
 method = "udp"
@@ -29,6 +30,10 @@ method = "udp"
 [[rules]]
 name = "adblock:filter.txt"
 action = "reject"
+
+[[rules]]
+name = "adblock:gfwlist.txt"
+upstream  = "cloudflare"
 
 [[rules]]
 name = "iplist:ip.txt"
@@ -48,7 +53,7 @@ upstream = "cloudflare"
 
 [[rules]]
 name = "other"
-upstream = "cloudflare"
+upstream = "FuzhouTelecom"
 
 [Groups.block]
 list = []

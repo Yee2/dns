@@ -1,3 +1,5 @@
 .idea
 dns
 dist
+*.txt
+*.exe
