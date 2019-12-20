@@ -67,6 +67,10 @@ func main() {
 			Value: "config.toml",
 			Usage: "set the config.toml file path",
 		},
+		cli.BoolFlag{
+			Name:  "debug",
+			Usage: "",
+		},
 	}}
 	err := app.Run(os.Args)
 	if err != nil {
@@ -87,6 +91,7 @@ func (rules *Rules) ServeDNS(w dns.ResponseWriter, request *dns.Msg) {
 		return
 	}
 	reply := request.Copy()
+	opt := request.IsEdns0()
 	for _, question := range request.Question {
 		// 第一步 查找 config.Records
 		logger.Debugf("query:%s", question.String())
@@ -95,7 +100,7 @@ func (rules *Rules) ServeDNS(w dns.ResponseWriter, request *dns.Msg) {
 			continue
 		}
 		// 第二步 从外部查询记录
-		if result, ok := rules.resolve(question); ok {
+		if result, ok := rules.resolve(question, opt); ok {
 			reply.Answer = append(reply.Answer, result.Answer...)
 			reply.Ns = append(reply.Ns, result.Ns...)
 			reply.Extra = append(reply.Extra, result.Extra...)
@@ -118,9 +123,14 @@ func (rules *Rules) local(question dns.Question) (msg *dns.Msg, ok bool) {
 	}
 	return nil, false
 }
-func (rules *Rules) resolve(question dns.Question) (result *dns.Msg, ok bool) {
+func (rules *Rules) resolve(question dns.Question, opt *dns.OPT) (result *dns.Msg, ok bool) {
 	msg := new(dns.Msg)
 	msg.Question = []dns.Question{question}
+	msg.RecursionDesired = true
+	if opt != nil {
+		msg.Extra = []dns.RR{opt}
+	}
+
 	for _, item := range rules.list {
 		if !item.Match(question) {
 			continue
@@ -130,7 +140,8 @@ func (rules *Rules) resolve(question dns.Question) (result *dns.Msg, ok bool) {
 		if reply, err := item.Exchange(msg); err != nil {
 			logger.Debugf("exchange error:%s", err)
 			continue
-		} else {
+		} else if len(reply.Answer) > 0 {
+			// FIXME: DNS服务器可能会返回上级NS服务器
 			logger.Debug("usage %s", item.Name())
 			return reply, true
 		}
@@ -143,6 +154,11 @@ type Handler interface {
 }
 
 func run(ctx *cli.Context) error {
+	if ctx.Bool("debug") {
+		logger.Level = logrus.TraceLevel
+	} else {
+		logger.Level = logrus.InfoLevel
+	}
 	data, err := ioutil.ReadFile(ctx.String("config"))
 	if err != nil {
 		return errors.Wrapf(err, "Failed to read configuration file(%s)", ctx.String("config"))
@@ -595,6 +611,7 @@ type DNS struct {
 
 func (s *DNS) Exchange(msg *dns.Msg) (reply *dns.Msg, err error) {
 	reply, _, err = s.client.Exchange(msg, s.address)
+	logger.Debugf("%s", reply)
 	if err != nil {
 		return nil, err
 	}
