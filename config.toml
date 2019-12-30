@@ -27,6 +27,16 @@ name = "aliyun"
 address = "223.5.5.5:53"
 method = "udp"
 
+[[upstreams]]
+name = "sg"
+address = "54.179.189.42:443"
+method = "tcp"
+
+
+[[rules]]
+name = "other"
+upstream = "sg"
+
 [[rules]]
 name = "adblock:filter.txt"
 action = "reject"
@@ -55,6 +65,7 @@ upstream = "cloudflare"
 name = "other"
 upstream = "FuzhouTelecom"
 
+
 [Groups.block]
 list = []
 
@@ -62,7 +73,7 @@ list = []
 list = []
 
 [[records]]
-name = "suffix:.onion"
+name = "example.local"
 type = "A"
 ttl = 3600
 context = "127.0.0.1"

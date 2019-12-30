@@ -112,6 +112,9 @@ func (rules *Rules) ServeDNS(w dns.ResponseWriter, request *dns.Msg) {
 }
 func (rules *Rules) local(question dns.Question) (msg *dns.Msg, ok bool) {
 	for _, record := range rules.records {
+		if question.Qclass != dns.ClassANY && question.Qclass != record.Header().Class {
+			continue
+		}
 		if record.Header().Rrtype != question.Qtype {
 			continue
 		}
