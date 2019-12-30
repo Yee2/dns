@@ -19,3 +19,14 @@ curl https://ftp.apnic.net/stats/apnic/delegated-apnic-latest | grep "|CN|ipv4|"
 ```shell script
 curl https://git.tuxfamily.org/gfwlist/gfwlist.git/plain/gfwlist.txt | base64 --decode > gfwlist.txt
 ```
+
+### 配置文件
+
+#### 解析记录
+```toml
+[[records]]
+name = "example.local"
+type = "A"
+ttl = 3600
+context = "123.2.3.4"
+```
