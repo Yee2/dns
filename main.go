@@ -367,7 +367,7 @@ func (that *IPList) Swap(i, j int) {
 }
 
 func (that *IPList) Match(question dns.Question) bool {
-	return question.Qtype != dns.TypeA && question.Qtype != dns.TypeAAAA
+	return question.Qtype == dns.TypeA || question.Qtype == dns.TypeAAAA
 }
 
 func (that *IPList) Contains(ip dns.RR) bool {
