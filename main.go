@@ -81,7 +81,7 @@ func main() {
 
 type Rules struct {
 	list    []Rule
-	records []dns.RR
+	records []dns.RR // 本地解析
 }
 
 func (rules *Rules) ServeDNS(w dns.ResponseWriter, request *dns.Msg) {
@@ -118,7 +118,7 @@ func (rules *Rules) local(question dns.Question) (msg *dns.Msg, ok bool) {
 		if record.Header().Rrtype != question.Qtype {
 			continue
 		}
-		if record.Header().Name == question.Name {
+		if Compare(record.Header().Name, question.Name) {
 			msg := new(dns.Msg)
 			msg.Answer = []dns.RR{record}
 			return msg, true
@@ -145,7 +145,7 @@ func (rules *Rules) resolve(question dns.Question, opt *dns.OPT) (result *dns.Ms
 			continue
 		} else if len(reply.Answer) > 0 {
 			// FIXME: DNS服务器可能会返回上级NS服务器
-			logger.Debug("usage %s", item.Name())
+			logger.Debugf("usage %s", item.Name())
 			return reply, true
 		}
 	}
@@ -367,7 +367,7 @@ func (that *IPList) Swap(i, j int) {
 }
 
 func (that *IPList) Match(question dns.Question) bool {
-	return question.Qtype != dns.TypeA || question.Qtype != dns.TypeAAAA
+	return question.Qtype != dns.TypeA && question.Qtype != dns.TypeAAAA
 }
 
 func (that *IPList) Contains(ip dns.RR) bool {
