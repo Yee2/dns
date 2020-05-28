@@ -3,6 +3,9 @@ Description=my dns service
 After=network.target
 
 [Service]
+User=nobody
+Group=nobody
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 ExecStart=/usr/bin/my-dns --config /etc/my-dns/config.toml
 Restart=always
 
