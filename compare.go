@@ -18,6 +18,10 @@ func Compare(parent, child string) bool {
 		i1 := prevLabel(parent[:j1])
 		i2 := prevLabel(child[:j2])
 
+		if i1 == 0 && parent[i1:j1] == "**" && child[i2:j2] != "" {
+			return true
+		}
+
 		if !equal(parent[i1:j1], child[i2:j2]) {
 			return false
 		}

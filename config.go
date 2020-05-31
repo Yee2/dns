@@ -45,7 +45,7 @@ func (r lRecord) RR() (rr dns.RR, e error) {
 	if r.TTL == 0{
 		r.TTL = 3600
 	}
-	header:=dns.RR_Header{Class: dns.ClassINET, Name: dns.Fqdn(r.Name), Ttl: r.TTL, }
+	header:=dns.RR_Header{Class: dns.ClassINET, Name: dns.Fqdn(r.Name), Ttl: r.TTL}
 	if r.Class != ""{
 		switch r.Class {
 		case "IN":
