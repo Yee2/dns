@@ -120,7 +120,9 @@ func (rules *Rules) local(question dns.Question) (msg *dns.Msg, ok bool) {
 		}
 		if Compare(record.Header().Name, question.Name) {
 			msg := new(dns.Msg)
-			msg.Answer = []dns.RR{record}
+			r := dns.Copy(record)
+			r.Header().Name = question.Name // 泛解析的域名需要转换成具体的域名
+			msg.Answer = []dns.RR{r}
 			return msg, true
 		}
 	}
