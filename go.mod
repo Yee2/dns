@@ -10,7 +10,7 @@ require (
 	github.com/asaskevich/govalidator v0.0.0-20190424111038-f61b66f89f4a // indirect
 	github.com/joomcode/errorx v1.0.0 // indirect
 	github.com/kr/pretty v0.1.0 // indirect
-	github.com/miekg/dns v1.1.19
+	github.com/miekg/dns v1.1.25
 	github.com/pkg/errors v0.8.1
 	github.com/shirou/gopsutil v2.19.9+incompatible // indirect
 	github.com/sirupsen/logrus v1.4.2
