@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -36,13 +37,14 @@ var (
 )
 
 type Response struct {
-	Status   int
-	TC       bool
-	RD       bool
-	RA       bool
-	AD       bool
-	CD       bool
-	Answer   []Record
+	Status int
+	TC     bool
+	RD     bool
+	RA     bool
+	AD     bool
+	CD     bool
+	Answer []Record
+	// FIXME: question单只有一个的时候，部分服务器可能会返回单个对象
 	Question []Record
 	Comment  string
 }
@@ -177,9 +179,10 @@ func run(ctx *cli.Context) error {
 	handles := make(map[string]Handler)
 	reject := &Reject{}
 	for _, upstream := range config.Upstreams {
+
 		switch upstream.Method {
 		case "doh3-json", "doh-json", "doh3-wireformat", "doh3", "doh-wireformat", "doh":
-			handle, err := NewDoH(upstream.Address, upstream.Method)
+			handle, err := NewDoH(upstream.Address, upstream.Method, upstream.Subnet)
 			if err != nil {
 				return err
 			}
@@ -417,7 +420,7 @@ func (that *IPList) Exchange(msg *dns.Msg) (r *dns.Msg, err error) {
 	return reply, nil
 }
 
-func NewDoH(address string, method string) (*DoH, error) {
+func NewDoH(address string, method string, subnet string) (*DoH, error) {
 	switch method {
 	case
 		"",
@@ -451,13 +454,50 @@ func NewDoH(address string, method string) (*DoH, error) {
 	} else {
 		methodUint8 = 1
 	}
-	return &DoH{address: u.String(), client: httpClient, method: methodUint8}, nil
+	dnsClient := &DoH{address: u.String(), client: httpClient, method: methodUint8, subnet: subnet}
+	if subnet != "" {
+		_, ip, err := net.ParseCIDR(subnet)
+		if err != nil {
+			return dnsClient, nil
+		}
+		v4 := ip.IP.To4()
+		if v4 != nil {
+			e := new(dns.EDNS0_SUBNET)
+			e.Code = dns.EDNS0SUBNET
+			e.Family = 1
+			e.SourceNetmask = 32
+			e.SourceScope = 0
+			e.Address = v4
+			o := new(dns.OPT)
+			o.Hdr.Name = "."
+			o.Hdr.Rrtype = dns.TypeOPT
+			o.Option = append(o.Option, e)
+			dnsClient.Extra = append(dnsClient.Extra, o)
+		} else {
+			v6 := ip.IP.To16()
+			e := new(dns.EDNS0_SUBNET)
+			e.Code = dns.EDNS0SUBNET
+			e.Family = 2
+			e.SourceNetmask = 128
+			e.SourceScope = 0
+			e.Address = v6
+			o := new(dns.OPT)
+			o.Hdr.Name = "."
+			o.Hdr.Rrtype = dns.TypeOPT
+			o.Option = append(o.Option, e)
+			dnsClient.Extra = append(dnsClient.Extra, o)
+		}
+	}
+
+	return dnsClient, nil
 }
 
 type DoH struct {
 	address string
 	client  *http.Client
 	method  uint8
+	subnet  string
+	Extra   []dns.RR
 }
 
 func (that *DoH) Exchange(m *dns.Msg) (r *dns.Msg, err error) {
@@ -469,6 +509,10 @@ func (that *DoH) Exchange(m *dns.Msg) (r *dns.Msg, err error) {
 }
 
 func (that *DoH) wireformat(r *dns.Msg) (response *dns.Msg, err error) {
+	if len(that.Extra) > 0 {
+		r = r.Copy()
+		r.Extra = append(r.Extra, that.Extra...)
+	}
 	raw, err := r.Pack()
 	if err != nil {
 		return nil, fmt.Errorf("failed to pack dns query:%w", err)
@@ -477,7 +521,7 @@ func (that *DoH) wireformat(r *dns.Msg) (response *dns.Msg, err error) {
 	if err != nil {
 		return nil, err
 	}
-	request.Header.Add("Content-Type", "application/dns-udpwireformat")
+	request.Header.Add("Content-Type", "application/dns-message")
 	request.Header.Add("accept", "application/dns-message")
 	resp, err := that.client.Do(request)
 	if err != nil {
@@ -499,13 +543,22 @@ func (that *DoH) wireformat(r *dns.Msg) (response *dns.Msg, err error) {
 }
 func (that *DoH) json(r *dns.Msg) (*dns.Msg, error) {
 	// TODO: 修正
+
 	records := make([]dns.RR, 0)
 	for _, question := range r.Question {
-		u := fmt.Sprintf("%s?name=%s&type=%d", that.address,
-			url.QueryEscape(question.Name),
-			question.Qtype,
-		)
-		request, err := http.NewRequest("GET", u, nil)
+		u, err := url.Parse(that.address)
+		if err != nil {
+			return nil, err
+		}
+		args := u.Query()
+		args.Set("name", question.Name)
+		args.Set("type", strconv.Itoa(int(question.Qtype)))
+		if that.subnet != "" {
+			args.Set("edns_client_subnet", that.subnet)
+		}
+		u.RawQuery = args.Encode()
+		logger.Debugf("dns json query:%s", u.String())
+		request, err := http.NewRequest("GET", u.String(), nil)
 		if err != nil {
 			logger.Warnf("error name:%s %s", question.Name, err)
 			continue
@@ -522,8 +575,8 @@ func (that *DoH) json(r *dns.Msg) (*dns.Msg, error) {
 			continue
 		}
 
-		DoHresp := &Response{}
-		err = json.NewDecoder(resp.Body).Decode(DoHresp)
+		DoHresp := Response{}
+		err = json.NewDecoder(resp.Body).Decode(&DoHresp)
 		resp.Body.Close()
 		if err != nil {
 			logger.Warn(errors.Wrap(err, "dns-over-https unmarshal fail"))
@@ -658,6 +711,7 @@ func NewDNS(address, method string, subnet string) (*DNS, error) {
 			dnsClient.Extra = append(dnsClient.Extra, o)
 		}
 	}
+
 	return dnsClient, nil
 }
 
