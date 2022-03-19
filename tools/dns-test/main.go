@@ -51,17 +51,17 @@ func main() {
 
 func TestUDP(address string) bool {
 	client := &dns.Client{Net: "udp", Timeout: time.Second * 3}
-	_, _, err := client.Exchange(Msg, fmt.Sprintf("%s:53",address))
+	_, _, err := client.Exchange(Msg, fmt.Sprintf("%s:53", address))
 	return err == nil
 }
 func TestTCP(address string) bool {
 	client := &dns.Client{Net: "tcp", Timeout: time.Second * 3}
-	_, _, err := client.Exchange(Msg, fmt.Sprintf("%s:53",address))
+	_, _, err := client.Exchange(Msg, fmt.Sprintf("%s:53", address))
 	return err == nil
 }
 
 func TestTLS(address string) bool {
 	client := &dns.Client{Net: "tcp-tls", Timeout: time.Second * 3, TLSConfig: &tls.Config{}}
-	_, _, err := client.Exchange(Msg, fmt.Sprintf("%s:853",address))
+	_, _, err := client.Exchange(Msg, fmt.Sprintf("%s:853", address))
 	return err == nil
 }

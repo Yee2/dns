@@ -16,20 +16,22 @@ var config = struct {
 		Name    string `toml:"name"`
 		Method  string `toml:"method"`
 		Address string `toml:"address"`
+		Subnet  string `toml:"subnet"`
 	} `toml:"upstreams"`
 	Rules []struct {
 		Name     string `toml:"name"`
 		Action   string `toml:"action"`
 		Upstream string `toml:"upstream"`
+		TTL      int    `toml:"ttl"`
 	} `toml:"rules"`
 	Groups map[string]struct {
 		Name string   `toml:"name"`
 		List []string `toml:"list"`
 	} `toml:"groups"`
-	Records []lRecord `toml:"records"`
+	Records []CustomRecord `toml:"records"`
 }{}
 
-type lRecord struct {
+type CustomRecord struct {
 	Name     string `toml:"name"`
 	Type     string `toml:"type"`
 	Class    string `toml:"class"`
@@ -38,15 +40,15 @@ type lRecord struct {
 	Priority uint16 `toml:"priority"`
 }
 
-func (r lRecord) RR() (rr dns.RR, e error) {
+func (r CustomRecord) RR() (rr dns.RR, e error) {
 	if _, is := dns.IsDomainName(r.Name); !is {
 		return nil, fmt.Errorf("invalid domain name:%s", r.Name)
 	}
-	if r.TTL == 0{
+	if r.TTL == 0 {
 		r.TTL = 3600
 	}
-	header:=dns.RR_Header{Class: dns.ClassINET, Name: dns.Fqdn(r.Name), Ttl: r.TTL}
-	if r.Class != ""{
+	header := dns.RR_Header{Class: dns.ClassINET, Name: dns.Fqdn(r.Name), Ttl: r.TTL}
+	if r.Class != "" {
 		switch r.Class {
 		case "IN":
 		case "CS":
@@ -60,19 +62,19 @@ func (r lRecord) RR() (rr dns.RR, e error) {
 	switch r.Type {
 	case "A":
 		ip := net.ParseIP(r.Context)
-		if ip.To4() == nil{
-			return nil,fmt.Errorf("bad IP address format:%s",r.Context)
+		if ip.To4() == nil {
+			return nil, fmt.Errorf("bad IP address format:%s", r.Context)
 		}
-		ipNet := net.IPNet{IP: net.IPv4(127,0,0,0), Mask: net.CIDRMask(8,32)}
-		if ipNet.Contains(ip){
+		ipNet := net.IPNet{IP: net.IPv4(127, 0, 0, 0), Mask: net.CIDRMask(8, 32)}
+		if ipNet.Contains(ip) {
 			header.Ttl = 0
 		}
 		header.Rrtype = dns.TypeA
-		return &dns.A{Hdr:header , A: ip.To4()}, nil
+		return &dns.A{Hdr: header, A: ip.To4()}, nil
 	case "AAAA":
 		ip := net.ParseIP(r.Context)
-		if ip.To16() == nil{
-			return nil,fmt.Errorf("bad IP address format:%s",r.Context)
+		if ip.To16() == nil {
+			return nil, fmt.Errorf("bad IP address format:%s", r.Context)
 		}
 		header.Rrtype = dns.TypeAAAA
 		return &dns.A{Hdr: header, A: ip.To16()}, nil

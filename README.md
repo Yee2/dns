@@ -11,11 +11,13 @@ make && make install
 ```
 
 ### 快速生成`China IP`列表
+
 ```shell script
 curl https://ftp.apnic.net/stats/apnic/delegated-apnic-latest | grep "|CN|ipv4|" | awk -F '|' '{print $4 "/" 32-log($5)/log(2)}' > ip.txt
 ```
 
 ### 生成 gfwlist
+
 ```shell script
 curl https://git.tuxfamily.org/gfwlist/gfwlist.git/plain/gfwlist.txt | base64 --decode > gfwlist.txt
 ```
@@ -23,6 +25,7 @@ curl https://git.tuxfamily.org/gfwlist/gfwlist.git/plain/gfwlist.txt | base64 --
 ### 配置文件
 
 #### 解析记录
+
 ```toml
 [[records]]
 name = "example.local"

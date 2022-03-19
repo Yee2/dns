@@ -4,12 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/tls"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"github.com/AdguardTeam/urlfilter"
 	"github.com/AdguardTeam/urlfilter/filterlist"
 	"github.com/BurntSushi/toml"
+	"github.com/lucas-clemente/quic-go/http3"
 	"github.com/miekg/dns"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -86,7 +86,7 @@ type Rules struct {
 
 func (rules *Rules) ServeDNS(w dns.ResponseWriter, request *dns.Msg) {
 	if len(request.Question) == 0 {
-		//TODO: 记录错误信息
+		logger.Debugf("bad request:%s", request)
 		_ = w.WriteMsg(new(dns.Msg).SetRcodeFormatError(request))
 		return
 	}
@@ -108,7 +108,7 @@ func (rules *Rules) ServeDNS(w dns.ResponseWriter, request *dns.Msg) {
 		}
 	}
 	reply.SetReply(request)
-	w.WriteMsg(reply)
+	_ = w.WriteMsg(reply)
 }
 func (rules *Rules) local(question dns.Question) (msg *dns.Msg, ok bool) {
 	for _, record := range rules.records {
@@ -178,32 +178,14 @@ func run(ctx *cli.Context) error {
 	reject := &Reject{}
 	for _, upstream := range config.Upstreams {
 		switch upstream.Method {
-		case "doh-json":
+		case "doh3-json", "doh-json", "doh3-wireformat", "doh3", "doh-wireformat", "doh":
 			handle, err := NewDoH(upstream.Address, upstream.Method)
 			if err != nil {
 				return err
 			}
 			handles[upstream.Name] = handle
-		case "doh-wireformat":
-			handle, err := NewDoH(upstream.Address, upstream.Method)
-			if err != nil {
-				return err
-			}
-			handles[upstream.Name] = handle
-		case "udp":
-			handle, err := NewDNS(upstream.Address, upstream.Method)
-			if err != nil {
-				return err
-			}
-			handles[upstream.Name] = handle
-		case "tcp":
-			handle, err := NewDNS(upstream.Address, upstream.Method)
-			if err != nil {
-				return err
-			}
-			handles[upstream.Name] = handle
-		case "tcp-tls":
-			handle, err := NewDNS(upstream.Address, upstream.Method)
+		case "udp", "tcp", "tcp-tls":
+			handle, err := NewDNS(upstream.Address, upstream.Method, upstream.Subnet)
 			if err != nil {
 				return err
 			}
@@ -269,6 +251,9 @@ func run(ctx *cli.Context) error {
 			return errors.Errorf("Unregistered match:%s", rule.Name)
 		}
 	}
+	for _, r := range rules.list {
+		logger.Infof("rule:%s", r.Name())
+	}
 	servers := make([]*dns.Server, 0, len(config.Servers))
 	errorChanel := make(chan error)
 
@@ -297,25 +282,37 @@ func (a *AdBlock) Name() string {
 	return "adBlock - " + a.file
 }
 
-// TODO: 实现 `HostRule`
+// Match TODO: 实现 `HostRule`
 func (a *AdBlock) Match(question dns.Question) bool {
-	_, ok := a.filter.Match(strings.TrimSuffix(question.Name, "."))
-	return ok
+	res, ok := a.filter.Match(strings.TrimSuffix(question.Name, "."))
+	if !ok {
+		return false
+	}
+	return !res.NetworkRule.Whitelist
 }
 
-// TODO: 解除文件占用
 func NewAdBlock(file string, handle Handler) (*AdBlock, error) {
 	o := file
 	if !filepath.IsAbs(file) {
 		file = filepath.Join(filepath.Dir(config.Path), file)
 	}
-	list, err := filterlist.NewFileRuleList(0, file, true)
+	fileRuleList, err := filterlist.NewFileRuleList(0, file, true)
 	if err != nil {
-		return nil, fmt.Errorf("filterlist.NewFileRuleList(): %s: %s", file, err)
+		return nil, fmt.Errorf("filterlist.NewFileRuleList(): %s: %w", file, err)
 	}
-	rulesStorage, err := filterlist.NewRuleStorage([]filterlist.RuleList{list})
+	defer fileRuleList.Close()
+	scanner := fileRuleList.NewScanner()
+	var rules []filterlist.RuleList
+	for scanner.Scan() {
+		r, id := scanner.Rule()
+		rules = append(rules, &filterlist.StringRuleList{
+			ID:        id,
+			RulesText: r.Text(),
+		})
+	}
+	rulesStorage, err := filterlist.NewRuleStorage(rules)
 	if err != nil {
-		return nil, fmt.Errorf("filterlist.NewRuleStorage(): %s", err)
+		return nil, fmt.Errorf("filterlist.NewRuleStorage(): %w", err)
 	}
 	filteringEngine := urlfilter.NewDNSEngine(rulesStorage)
 	return &AdBlock{file: o, filter: filteringEngine, Handler: handle}, nil
@@ -336,12 +333,15 @@ func NewIPList(file string, handle Handler) (*IPList, error) {
 		if err == io.EOF {
 			break
 		}
-		_, ipnet, err := net.ParseCIDR(string(line))
+		_, IP, err := net.ParseCIDR(string(line))
 		if err != nil {
-			fmt.Printf("解析IP出现错误:%s\n", err)
+			logger.Infof("parser IP error:%s", err)
 			continue
 		}
-		r.list = append(r.list, ipnet)
+		r.list = append(r.list, &net.IPNet{
+			IP:   IP.IP.Mask(IP.Mask).To16(),
+			Mask: IP.Mask,
+		})
 	}
 	sort.Sort(r)
 	return r, nil
@@ -361,7 +361,7 @@ func (that *IPList) Len() int {
 }
 
 func (that *IPList) Less(i, j int) bool {
-	return binary.BigEndian.Uint32(that.list[i].IP) < binary.BigEndian.Uint32(that.list[j].IP)
+	return bytes.Compare(that.list[i].IP, that.list[j].IP) < 0
 }
 
 func (that *IPList) Swap(i, j int) {
@@ -372,25 +372,28 @@ func (that *IPList) Match(question dns.Question) bool {
 	return question.Qtype == dns.TypeA || question.Qtype == dns.TypeAAAA
 }
 
-func (that *IPList) Contains(ip dns.RR) bool {
-	//TODO: 添加对 IPv6 的支持
-	if _, ok := ip.(*dns.CNAME); ok {
-		return true
-	}
-	record, ok := ip.(*dns.A)
-	if !ok {
+func (that *IPList) Contains(rr dns.RR) bool {
+	var ip net.IP
+	switch v := rr.(type) {
+	case *dns.A:
+		ip = v.A.To16()
+	case *dns.AAAA:
+		ip = v.AAAA
+	default:
 		return false
 	}
+
 	list := that.list
 	if len(list) == 0 {
 		return false
 	}
 	for {
 		key := len(list) / 2
-		if list[key].Contains(record.A) {
+		if list[key].Contains(ip) {
 			return true
 		}
-		if binary.BigEndian.Uint32(record.A.Mask(list[key].Mask)) > binary.BigEndian.Uint32(list[key].IP) {
+
+		if bytes.Compare(ip, list[key].IP) > 0 {
 			list = list[key+1:]
 		} else {
 			list = list[:key]
@@ -415,23 +418,40 @@ func (that *IPList) Exchange(msg *dns.Msg) (r *dns.Msg, err error) {
 }
 
 func NewDoH(address string, method string) (*DoH, error) {
-	if method != "doh-json" && method != "doh-wireformat" && method != "" {
-		return nil, errors.Errorf("错误的方式")
+	switch method {
+	case
+		"",
+		"doh",
+		"doh-json",
+		"doh-wireformat",
+		"doh3",
+		"doh3-json",
+		"doh3-wireformat":
+	default:
+
+		return nil, fmt.Errorf("query method is not supported:%s", method)
 	}
 	u, err := url.Parse(address)
 	if err != nil {
 		return nil, err
 	}
-	transport := &http.Transport{
-		TLSClientConfig:    &tls.Config{ServerName: u.Hostname()},
-		DisableCompression: true,
-		MaxIdleConns:       1,
+	httpClient := &http.Client{}
+	if strings.HasPrefix(method, "doh3") {
+		httpClient.Transport = &http3.RoundTripper{}
+	} else {
+		httpClient.Transport = &http.Transport{
+			TLSClientConfig:    &tls.Config{ServerName: u.Hostname()},
+			DisableCompression: true,
+			MaxIdleConns:       1,
+		}
 	}
 	var methodUint8 uint8
-	if method == "doh-wireformat" {
+	if strings.HasSuffix(method, "json") {
+		methodUint8 = 0
+	} else {
 		methodUint8 = 1
 	}
-	return &DoH{address: u.String(), client: &http.Client{Transport: transport}, method: methodUint8}, nil
+	return &DoH{address: u.String(), client: httpClient, method: methodUint8}, nil
 }
 
 type DoH struct {
@@ -463,10 +483,10 @@ func (that *DoH) wireformat(r *dns.Msg) (response *dns.Msg, err error) {
 	if err != nil {
 		return nil, fmt.Errorf("dns-over-https:%w", err)
 	}
+	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("dns-over-https error code %d", resp.StatusCode)
 	}
-	defer resp.Body.Close()
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("dns-over-https:%w", err)
@@ -487,7 +507,7 @@ func (that *DoH) json(r *dns.Msg) (*dns.Msg, error) {
 		)
 		request, err := http.NewRequest("GET", u, nil)
 		if err != nil {
-			logger.Warn(err)
+			logger.Warnf("error name:%s %s", question.Name, err)
 			continue
 		}
 		request.Header.Add("accept", "application/dns-json")
@@ -498,15 +518,13 @@ func (that *DoH) json(r *dns.Msg) (*dns.Msg, error) {
 		}
 		if resp.StatusCode != 200 {
 			logger.Warn(errors.Wrapf(err, "dns-over-https error code %d", resp.StatusCode))
+			resp.Body.Close()
 			continue
 		}
-		data, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			logger.Warn(errors.Wrap(err, "dns-over-https read error"))
-			continue
-		}
+
 		DoHresp := &Response{}
-		err = json.Unmarshal(data, DoHresp)
+		err = json.NewDecoder(resp.Body).Decode(DoHresp)
+		resp.Body.Close()
 		if err != nil {
 			logger.Warn(errors.Wrap(err, "dns-over-https unmarshal fail"))
 			continue
@@ -521,7 +539,7 @@ func (that *DoH) json(r *dns.Msg) (*dns.Msg, error) {
 			if answer.Type == dns.TypeTXT {
 				record = fmt.Sprintf(`%s %d IN %s "%s"`,
 					question.Name, answer.TTL, dns.Type(answer.Type),
-					strings.Replace(answer.Data, `"`, `\"`, 0))
+					strings.Replace(answer.Data, `"`, `\"`, -1))
 			}
 			logger.Info(record)
 			rr, err := dns.NewRR(record)
@@ -533,7 +551,6 @@ func (that *DoH) json(r *dns.Msg) (*dns.Msg, error) {
 			}
 			records = append(records, rr)
 		}
-		resp.Body.Close()
 	}
 
 	reply := &dns.Msg{Answer: records}
@@ -595,7 +612,7 @@ func (p *RuleSimple) Match(question dns.Question) bool {
 		return false
 	}
 }
-func NewDNS(address, method string) (*DNS, error) {
+func NewDNS(address, method string, subnet string) (*DNS, error) {
 	_, port, err := net.SplitHostPort(address)
 	if err != nil {
 		return nil, fmt.Errorf("parsing address error:%w", err)
@@ -606,17 +623,56 @@ func NewDNS(address, method string) (*DNS, error) {
 	if method != "" && method != "tcp" && method != "udp" && method != "tcp-tls" {
 		return nil, errors.Errorf("Unregistered query method:%s", method)
 	}
-	return &DNS{address, &dns.Client{Net: method}}, nil
+	dnsClient := &DNS{address, &dns.Client{Net: method}, nil}
+	if subnet != "" {
+		_, ip, err := net.ParseCIDR(subnet)
+		if err != nil {
+			return dnsClient, nil
+		}
+		v4 := ip.IP.To4()
+		if v4 != nil {
+			e := new(dns.EDNS0_SUBNET)
+			e.Code = dns.EDNS0SUBNET
+			e.Family = 1
+			e.SourceNetmask = 32
+			e.SourceScope = 0
+			e.Address = v4
+			o := new(dns.OPT)
+			o.Hdr.Name = "."
+			o.Hdr.Rrtype = dns.TypeOPT
+			o.Option = append(o.Option, e)
+			dnsClient.Extra = append(dnsClient.Extra, o)
+		}
+		v6 := ip.IP.To16()
+		if v6 != nil {
+			e := new(dns.EDNS0_SUBNET)
+			e.Code = dns.EDNS0SUBNET
+			e.Family = 2
+			e.SourceNetmask = 128
+			e.SourceScope = 0
+			e.Address = v6
+			o := new(dns.OPT)
+			o.Hdr.Name = "."
+			o.Hdr.Rrtype = dns.TypeOPT
+			o.Option = append(o.Option, e)
+			dnsClient.Extra = append(dnsClient.Extra, o)
+		}
+	}
+	return dnsClient, nil
 }
 
 type DNS struct {
 	address string
 	client  *dns.Client
+	Extra   []dns.RR
 }
 
 func (s *DNS) Exchange(msg *dns.Msg) (reply *dns.Msg, err error) {
+	if len(s.Extra) > 0 {
+		msg = msg.Copy()
+		msg.Extra = append(msg.Extra, s.Extra...)
+	}
 	reply, _, err = s.client.Exchange(msg, s.address)
-	logger.Debugf("%s", reply)
 	if err != nil {
 		return nil, err
 	}
