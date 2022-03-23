@@ -7,8 +7,9 @@ import (
 )
 
 var config = struct {
-	Path    string
-	Servers []struct {
+	Path          string
+	Authoritative bool
+	Servers       []struct {
 		Type    string `toml:"type"`
 		Address string `toml:"address"`
 	} `toml:"listen"`

@@ -37,14 +37,13 @@ var (
 )
 
 type Response struct {
-	Status int
-	TC     bool
-	RD     bool
-	RA     bool
-	AD     bool
-	CD     bool
-	Answer []Record
-	// FIXME: question单只有一个的时候，部分服务器可能会返回单个对象
+	Status   int
+	TC       bool
+	RD       bool
+	RA       bool
+	AD       bool
+	CD       bool
+	Answer   []Record
 	Question []Record
 	Comment  string
 }
@@ -87,32 +86,33 @@ type Rules struct {
 }
 
 func (rules *Rules) ServeDNS(w dns.ResponseWriter, request *dns.Msg) {
-	if len(request.Question) == 0 {
-		logger.Debugf("bad request:%s", request)
-		_ = w.WriteMsg(new(dns.Msg).SetRcodeFormatError(request))
+	// 单个 DNS 请求里面附带多个问题没有任何意义，直接拒绝
+	if len(request.Question) != 1 {
+		logger.Info("bad request:%s", request)
+		_ = w.WriteMsg(new(dns.Msg).SetRcode(request, 0x05))
 		return
 	}
-	reply := request.Copy()
-	opt := request.IsEdns0()
-	for _, question := range request.Question {
-		// 第一步 查找 config.Records
-		logger.Debugf("query:%s", question.String())
-		if msg, ok := rules.local(question); ok {
-			reply.Answer = append(reply.Answer, msg.Answer...)
-			continue
-		}
-		// 第二步 从外部查询记录
-		if result, ok := rules.resolve(question, opt); ok {
-			reply.Answer = append(reply.Answer, result.Answer...)
-			reply.Ns = append(reply.Ns, result.Ns...)
-			reply.Extra = append(reply.Extra, result.Extra...)
-			continue
-		}
+
+	logger.Debugf("query:%s", request.Question[0].String())
+	if reply, ok := rules.local(request); ok {
+		_ = w.WriteMsg(reply)
+		return
 	}
-	reply.SetReply(request)
-	_ = w.WriteMsg(reply)
+	// 作为权威服务器，不进行后续递归查询
+	if config.Authoritative {
+		reply := new(dns.Msg).SetRcode(request, dns.RcodeNameError)
+		reply.RecursionAvailable = false
+		reply.Authoritative = true
+		_ = w.WriteMsg(reply)
+	}
+	if reply, ok := rules.resolve(request); ok {
+		_ = w.WriteMsg(reply)
+	} else {
+		_ = w.WriteMsg(new(dns.Msg).SetRcode(request, dns.RcodeNotImplemented))
+	}
 }
-func (rules *Rules) local(question dns.Question) (msg *dns.Msg, ok bool) {
+func (rules *Rules) local(request *dns.Msg) (msg *dns.Msg, ok bool) {
+	question := request.Question[0]
 	for _, record := range rules.records {
 		if question.Qclass != dns.ClassANY && question.Qclass != record.Header().Class {
 			continue
@@ -121,34 +121,27 @@ func (rules *Rules) local(question dns.Question) (msg *dns.Msg, ok bool) {
 			continue
 		}
 		if Compare(record.Header().Name, question.Name) {
-			msg := new(dns.Msg)
-			r := dns.Copy(record)
-			r.Header().Name = question.Name // 泛解析的域名需要转换成具体的域名
-			msg.Answer = []dns.RR{r}
+			msg := new(dns.Msg).SetReply(request)
+			msg.Authoritative = true
+			answer := dns.Copy(record)
+			answer.Header().Name = question.Name // 泛解析的域名需要转换成具体的域名
+			msg.Answer = []dns.RR{answer}
 			return msg, true
 		}
 	}
 	return nil, false
 }
-func (rules *Rules) resolve(question dns.Question, opt *dns.OPT) (result *dns.Msg, ok bool) {
-	msg := new(dns.Msg)
-	msg.Question = []dns.Question{question}
-	msg.RecursionDesired = true
-	if opt != nil {
-		msg.Extra = []dns.RR{opt}
-	}
-
+func (rules *Rules) resolve(request *dns.Msg) (result *dns.Msg, ok bool) {
+	q := request.Question[0]
 	for _, item := range rules.list {
-		if !item.Match(question) {
+		if !item.Match(q) {
 			continue
 		}
 		logger.Debugf("try %s", item.Name())
-		msg.MsgHdr.Id = uint16(rand.Int())
-		if reply, err := item.Exchange(msg); err != nil {
+		if reply, err := item.Exchange(request); err != nil {
 			logger.Debugf("exchange error:%s", err)
 			continue
 		} else if len(reply.Answer) > 0 {
-			// FIXME: DNS服务器可能会返回上级NS服务器
 			logger.Debugf("usage %s", item.Name())
 			return reply, true
 		}
@@ -542,72 +535,58 @@ func (that *DoH) wireformat(r *dns.Msg) (response *dns.Msg, err error) {
 	return reply, nil
 }
 func (that *DoH) json(r *dns.Msg) (*dns.Msg, error) {
-	// TODO: 修正
+	question := r.Question[0]
+	reply := new(dns.Msg).SetReply(r)
+	u, err := url.Parse(that.address)
+	if err != nil {
+		return nil, err
+	}
+	args := u.Query()
+	args.Set("name", question.Name)
+	args.Set("type", strconv.Itoa(int(question.Qtype)))
+	if that.subnet != "" {
+		args.Set("edns_client_subnet", that.subnet)
+	}
+	u.RawQuery = args.Encode()
+	logger.Debugf("dns json query:%s", u.String())
+	request, err := http.NewRequest("GET", u.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("request error:%s %s", question.Name, err)
+	}
+	request.Header.Add("accept", "application/dns-json")
+	resp, err := that.client.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("request error:%s %s", question.Name, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("request error:%s %s", question.Name, err)
+	}
 
-	records := make([]dns.RR, 0)
-	for _, question := range r.Question {
-		u, err := url.Parse(that.address)
+	DoHresp := Response{}
+	err = json.NewDecoder(resp.Body).Decode(&DoHresp)
+	if err != nil {
+		return nil, fmt.Errorf("error response data:%s %s", question.Name, err)
+	}
+	if DoHresp.Status != 0 {
+		return nil, fmt.Errorf("request error:%s %s", question.Name, err)
+	}
+	for _, answer := range DoHresp.Answer {
+		record := fmt.Sprintf("%s %d IN %s %s",
+			question.Name, answer.TTL, dns.Type(answer.Type), answer.Data)
+		if answer.Type == dns.TypeTXT {
+			record = fmt.Sprintf(`%s %d IN %s "%s"`,
+				question.Name, answer.TTL, dns.Type(answer.Type),
+				strings.Replace(answer.Data, `"`, `\"`, -1))
+		}
+		logger.Debugf(record)
+		rr, err := dns.NewRR(record)
 		if err != nil {
 			return nil, err
 		}
-		args := u.Query()
-		args.Set("name", question.Name)
-		args.Set("type", strconv.Itoa(int(question.Qtype)))
-		if that.subnet != "" {
-			args.Set("edns_client_subnet", that.subnet)
-		}
-		u.RawQuery = args.Encode()
-		logger.Debugf("dns json query:%s", u.String())
-		request, err := http.NewRequest("GET", u.String(), nil)
-		if err != nil {
-			logger.Warnf("error name:%s %s", question.Name, err)
-			continue
-		}
-		request.Header.Add("accept", "application/dns-json")
-		resp, err := that.client.Do(request)
-		if err != nil {
-			logger.Warn(errors.Wrap(err, "dns-over-https"))
-			continue
-		}
-		if resp.StatusCode != 200 {
-			logger.Warn(errors.Wrapf(err, "dns-over-https error code %d", resp.StatusCode))
-			resp.Body.Close()
-			continue
-		}
-
-		DoHresp := Response{}
-		err = json.NewDecoder(resp.Body).Decode(&DoHresp)
-		resp.Body.Close()
-		if err != nil {
-			logger.Warn(errors.Wrap(err, "dns-over-https unmarshal fail"))
-			continue
-		}
-		if DoHresp.Status != 0 {
-			logger.Warn(errors.Errorf("dns-over-https error:%s", DoHresp.Comment))
-			continue
-		}
-		for _, answer := range DoHresp.Answer {
-			record := fmt.Sprintf("%s %d IN %s %s",
-				question.Name, answer.TTL, dns.Type(answer.Type), answer.Data)
-			if answer.Type == dns.TypeTXT {
-				record = fmt.Sprintf(`%s %d IN %s "%s"`,
-					question.Name, answer.TTL, dns.Type(answer.Type),
-					strings.Replace(answer.Data, `"`, `\"`, -1))
-			}
-			logger.Info(record)
-			rr, err := dns.NewRR(record)
-			if err != nil {
-				logger.Warn(errors.Wrapf(err, "dns-over-https error Answer:%s",
-					fmt.Sprintf("%s %d IN %s %s",
-						question.Name, answer.TTL, dns.Type(answer.Type), answer.Data)))
-				continue
-			}
-			records = append(records, rr)
-		}
+		reply.Answer = append(reply.Answer, rr)
 	}
-
-	reply := &dns.Msg{Answer: records}
-	if len(records) == 0 {
+	if len(reply.Answer) == 0 {
 		reply.SetRcode(r, dns.RcodeServerFailure)
 	}
 	return reply, nil
@@ -673,7 +652,9 @@ func NewDNS(address, method string, subnet string) (*DNS, error) {
 	if port == "" {
 		address = net.JoinHostPort(address, "53")
 	}
-	if method != "" && method != "tcp" && method != "udp" && method != "tcp-tls" {
+	switch method {
+	case "", "tcp", "udp", "tcp-tls":
+	default:
 		return nil, errors.Errorf("Unregistered query method:%s", method)
 	}
 	dnsClient := &DNS{address, &dns.Client{Net: method}, nil}
