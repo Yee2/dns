@@ -88,7 +88,7 @@ type Rules struct {
 func (rules *Rules) ServeDNS(w dns.ResponseWriter, request *dns.Msg) {
 	// 单个 DNS 请求里面附带多个问题没有任何意义，直接拒绝
 	if len(request.Question) != 1 {
-		logger.Info("bad request:%s", request)
+		logger.Infof("bad request:%s", request)
 		_ = w.WriteMsg(new(dns.Msg).SetRcode(request, 0x05))
 		return
 	}
@@ -278,13 +278,19 @@ func (a *AdBlock) Name() string {
 	return "adBlock - " + a.file
 }
 
-// Match TODO: 实现 `HostRule`
 func (a *AdBlock) Match(question dns.Question) bool {
 	res, ok := a.filter.Match(strings.TrimSuffix(question.Name, "."))
 	if !ok {
 		return false
 	}
-	return !res.NetworkRule.Whitelist
+	if res.NetworkRule != nil {
+		return !res.NetworkRule.Whitelist
+	} else if res.HostRulesV4 != nil {
+		return true
+	} else if res.HostRulesV6 != nil {
+		return true
+	}
+	return false
 }
 
 func NewAdBlock(file string, handle Handler) (*AdBlock, error) {
