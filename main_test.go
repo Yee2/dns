@@ -22,7 +22,7 @@ func TestRuleSimple_Match(t *testing.T) {
 	type fields struct {
 		rule    string
 		method  MatchType
-		Handler Handler
+		Handler Filter
 	}
 	prefixMatch := fields{
 		rule:    "abc",
@@ -76,11 +76,10 @@ func TestRuleSimple_Match(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			p := &RuleSimple{
-				rule:    tt.fields.rule,
-				method:  tt.fields.method,
-				Handler: tt.fields.Handler,
+				rule:   tt.fields.rule,
+				method: tt.fields.method,
 			}
-			if got := p.Match(tt.args); got != tt.want {
+			if got := p.match(tt.args); got != tt.want {
 				t.Errorf("Match() = %v:%v, want %v", got, tt.args, tt.want)
 			}
 		})
@@ -120,10 +119,11 @@ func TestIPList_Contains(t *testing.T) {
 		return
 	}
 	defer os.Remove(f.Name())
-	list, err := NewIPList(f.Name(), nil)
+	filter, err := NewIPList(f.Name(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	list := filter.(*IPList)
 	tests := []struct {
 		name string
 		want bool
@@ -165,10 +165,11 @@ one.example
 ||some.example
 ||good.some.example
 `)
-	rules, err := NewAdBlock(f.Name(), nil)
+	filter, err := NewAdBlock(f.Name(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	rules := filter.(*AdBlock)
 	tests := []struct {
 		args string
 		want bool
@@ -185,7 +186,7 @@ one.example
 	}
 	for _, tt := range tests {
 		t.Run(tt.args, func(t *testing.T) {
-			if got := rules.Match(questionA(tt.args)); got != tt.want {
+			if got := rules.match(questionA(tt.args)); got != tt.want {
 				t.Errorf("Match(%s) = %v, want %v", tt.args, got, tt.want)
 			}
 		})
