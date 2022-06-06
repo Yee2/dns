@@ -112,6 +112,8 @@ func (rules *Server) ServeDNS(w dns.ResponseWriter, request *dns.Msg) {
 	reply, err := rules.q(request)
 	if err != nil {
 		logger.Warnf("query error:%s", err)
+		_ = w.WriteMsg(new(dns.Msg).SetRcode(request, dns.RcodeServerFailure))
+		return
 	}
 	for _, rr := range reply.Answer {
 		logger.Infof("[A] %s", rr)
@@ -204,6 +206,8 @@ func run() error {
 			queryChain = wrap(&RuleSimple{rule: array[1], method: suffix, provider: provider}, queryChain)
 		case "contain":
 			queryChain = wrap(&RuleSimple{rule: array[1], method: contain, provider: provider}, queryChain)
+		case "domain":
+			queryChain = wrap(&RuleSimple{rule: array[1], method: domain, provider: provider}, queryChain)
 		case "fqdn":
 			queryChain = wrap(&RuleSimple{rule: array[1], method: fqdn, provider: provider}, queryChain)
 		case "other":
@@ -305,6 +309,7 @@ const (
 	ip
 	contain
 	fqdn
+	domain
 	other
 )
 
@@ -331,6 +336,8 @@ func (p *RuleSimple) match(question dns.Question) bool {
 		return strings.HasSuffix(dns.Fqdn(address), dns.Fqdn(p.rule))
 	case contain:
 		return strings.Contains(address, p.rule)
+	case domain:
+		return Compare(p.rule, address)
 	case fqdn:
 		return address == dns.Fqdn(p.rule)
 	case other:
