@@ -20,9 +20,7 @@ func NewQuicDns(address string) (Provider, error) {
 	}
 	logger.Debugf("quic hostname:%s", info.Hostname())
 	s, err := quic.DialAddr(info.Host, &tls.Config{ServerName: info.Hostname()},
-		&quic.Config{
-			KeepAlive: true,
-		},
+		&quic.Config{},
 	)
 	if err != nil {
 		return nil, err
@@ -35,7 +33,7 @@ func NewQuicDns(address string) (Provider, error) {
 
 type QuicDns struct {
 	address string
-	s       quic.Session
+	s       quic.Connection
 }
 
 func (q *QuicDns) name() string {
