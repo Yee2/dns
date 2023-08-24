@@ -2,8 +2,8 @@ package main
 
 import (
 	"crypto/tls"
-	"github.com/lucas-clemente/quic-go/http3"
 	"github.com/miekg/dns"
+	"github.com/quic-go/quic-go/http3"
 	"io"
 	"net"
 	"net/http"

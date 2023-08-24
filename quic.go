@@ -1,10 +1,11 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
-	"github.com/lucas-clemente/quic-go"
 	"github.com/miekg/dns"
+	"github.com/quic-go/quic-go"
 	"net/url"
 	"sync"
 )
@@ -19,7 +20,7 @@ func NewQuicDns(address string) (Provider, error) {
 		return nil, fmt.Errorf("解析网址失败:%w", err)
 	}
 	logger.Debugf("quic hostname:%s", info.Hostname())
-	s, err := quic.DialAddr(info.Host, &tls.Config{ServerName: info.Hostname()},
+	s, err := quic.DialAddr(context.Background(), info.Host, &tls.Config{ServerName: info.Hostname()},
 		&quic.Config{},
 	)
 	if err != nil {
